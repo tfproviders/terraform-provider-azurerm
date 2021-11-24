@@ -4,6 +4,47 @@
 
 # Terraform Provider for Azure (Resource Manager)
 
+---
+### Why this fork
+
+This fork contains the enhancements requested by the community to [hashicorp/terraform-provider-azurerm](https://github.com/hashicorp/terraform-provider-azurerm), however is taking time to complete.
+I am trying to keep a copy with of additional implementation so that we can use them while the official plugin implement it.
+
+| Official Tag| Fork Tag |
+| :---        |    :----:   |
+| [v2.85.0](https://github.com/hashicorp/terraform-provider-azurerm/releases/tag/v2.85.0)| [v3.85.1](https://github.com/sl0wc0d3r/terraform-provider-azurerm/releases/tag/v3.85.1)|
+
+
+```hcl
+resource "azurerm_hdinsight_hbase_cluster" "example" {
+  name                      = "example-hdicluster"
+  resource_group_name       = azurerm_resource_group.example.name
+  location                  = azurerm_resource_group.example.location
+  cluster_version           = "3.6"
+  enable_accelerated_writes = true                      # Added in this Fork
+  tier                      = "Standard"
+
+  component_version {}
+  gateway {}
+  storage_account {}
+  roles {
+    head_node {}
+    worker_node {}
+    zookeeper_node {}
+  }
+  enable_disk_encryption {                               # Added in this fork
+    using_pmk    = false
+    using_cmk_key_url = "https://example.vault.azure.net/keys/xxxxx/xxxxxx"
+    msi_resource_id   = "/subscriptions/xxxxxx-xxxxxxx-xxxx-xxxxxxx-xxxxxx/resourcegroups/example/providers/microsoft.managedidentity/userassignedidentities/example-assigned-managed-identity"
+  }
+}
+```
+
+- `enable_accelerated_writes` added to enable **accelerated writes** for `HBase` clusters.
+- `enable_disk_encryption {}` added to enable **encryption at rest** for `HBase` clusters.
+
+---
+
 Version 2.x of the AzureRM Provider requires Terraform 0.12.x and later, but 1.0 is recommended.
 
 * [Terraform Website](https://www.terraform.io)

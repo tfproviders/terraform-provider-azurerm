@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/hdinsight/mgmt/2018-06-01/hdinsight"
@@ -40,6 +41,27 @@ func hdinsightClusterUpdate(clusterKind string, readFunc pluginsdk.ReadFunc) plu
 			}
 		}
 
+		if d.HasChange("enable_disk_encryption") {
+			log.Printf("[DEBUG] Updating the HDInsight %q Cluster Disk Encryption properties", clusterKind)
+			diskEncryptionProperties := d.Get("enable_disk_encryption").([]interface{})[0].(map[string]interface{})
+			diskEncryptionKeyName := utils.String(strings.Split(diskEncryptionProperties["using_cmk_key_url"].(string), "/")[4])
+			diskEncryptionKeyVersion := utils.String(strings.Split(diskEncryptionProperties["using_cmk_key_url"].(string), "/")[5])
+			diskEncryptionVaultUri := utils.String("https://" + strings.Split(diskEncryptionProperties["using_cmk_key_url"].(string), "/")[2])
+			params := hdinsight.ClusterDiskEncryptionParameters{
+				VaultURI:   diskEncryptionVaultUri,
+				KeyName:    diskEncryptionKeyName,
+				KeyVersion: diskEncryptionKeyVersion,
+			}
+			future, err := client.RotateDiskEncryptionKey(ctx, resourceGroup, name, params)
+			if err != nil {
+				return fmt.Errorf("rotating encryption key %q for HDInsight %q Cluster %q (Resource Group %q): %+v",diskEncryptionKeyName, clusterKind, name, resourceGroup, err)
+			}
+
+			if err = future.WaitForCompletionRef(ctx, client.Client); err != nil {
+				return fmt.Errorf("waiting for the HDInsight %q Cluster %q (Resource Group %q) to finish encryption key rotation: %+v", clusterKind, name, resourceGroup, err)
+			}
+		}
+
 		if d.HasChange("roles.0.worker_node") {
 			log.Printf("[DEBUG] Resizing the HDInsight %q Cluster", clusterKind)
 			rolesRaw := d.Get("roles").([]interface{})
@@ -61,7 +83,6 @@ func hdinsightClusterUpdate(clusterKind string, readFunc pluginsdk.ReadFunc) plu
 					return fmt.Errorf("waiting for the HDInsight %q Cluster %q (Resource Group %q) to finish resizing: %+v", clusterKind, name, resourceGroup, err)
 				}
 			}
-
 			if d.HasChange("roles.0.worker_node.0.autoscale") {
 				autoscale := ExpandHDInsightNodeAutoScaleDefinition(workerNode["autoscale"].([]interface{}))
 				params := hdinsight.AutoscaleConfigurationUpdateParameter{
@@ -187,6 +208,41 @@ func hdinsightClusterDelete(clusterKind string) pluginsdk.DeleteFunc {
 
 		return nil
 	}
+}
+
+func hdInsightEncryptDataDiskProperties(input []interface{}) (*hdinsight.DiskEncryptionProperties, error) {
+	var encryptDataDisks hdinsight.DiskEncryptionProperties
+	values := input[0].(map[string]interface{})
+	if values["using_pmk"] == "" && values["using_cmk_key_url"] != "" {
+		return nil, fmt.Errorf("either `using_pmk` or `using_cmk_key_url` needs to be set for `enable_disk_encryption` block")
+	}
+	if values["using_pmk"] != "" {
+		encryptUsingPmk := values["using_pmk"].(bool)
+		if encryptUsingPmk {
+			encryptDataDisks.EncryptionAtHost = utils.Bool(true)
+		} else {
+			encryptDataDisks.EncryptionAtHost = utils.Bool(false)
+		}
+	}
+	if values["using_cmk_key_url"] != "" {
+		encryptDataDisks.VaultURI = utils.String("https://" + strings.Split(values["using_cmk_key_url"].(string), "/")[2])
+		encryptDataDisks.KeyName = utils.String(strings.Split(values["using_cmk_key_url"].(string), "/")[4])
+		encryptDataDisks.KeyVersion = utils.String(strings.Split(values["using_cmk_key_url"].(string), "/")[5])
+		encryptDataDisks.EncryptionAtHost = utils.Bool(true)
+		encryptDataDisks.MsiResourceID = utils.String(values["msi_resource_id"].(string))
+	}
+	return &encryptDataDisks, nil
+}
+
+func hdinsightUserDefinedClusterIdentity(msi string)  *hdinsight.ClusterIdentity {
+	identity := &hdinsight.ClusterIdentity{
+		Type: hdinsight.ResourceIdentityTypeUserAssigned,
+		UserAssignedIdentities: map[string]*hdinsight.ClusterIdentityUserAssignedIdentitiesValue{},
+	}
+	if msi != "" {
+		identity.UserAssignedIdentities[msi] = &hdinsight.ClusterIdentityUserAssignedIdentitiesValue{}
+	}
+	return identity
 }
 
 type hdInsightRoleDefinition struct {

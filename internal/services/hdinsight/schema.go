@@ -463,8 +463,42 @@ func FlattenHDInsightsNetwork(input *hdinsight.NetworkProperties) []interface{} 
 	}
 }
 
+func FlattenHDInsightsDiskEncryptionConfigurations(input *hdinsight.DiskEncryptionProperties) []interface{} {
+	var (
+		usingPmk        *bool
+		usingCmkKeyUrl *string
+		msiResourceId  *string
+	)
+	if input == nil {
+		return make([]interface{}, 0)
+	}
+
+	if input.VaultURI != nil && input.KeyName != nil && input.KeyVersion != nil {
+		vaultUri := *input.VaultURI
+		keyName := *input.KeyName
+		keyVersion := *input.KeyVersion
+		vaultUrl := vaultUri + "/" + "keys/" + keyName + "/" + keyVersion
+		usingCmkKeyUrl = utils.String(vaultUrl)
+		usingPmk = utils.Bool(false)
+	} else {
+		usingPmk = utils.Bool(true)
+	}
+
+	if input.MsiResourceID != nil {
+		msiResourceId = input.MsiResourceID
+	}
+
+	return []interface{}{
+		map[string]interface{}{
+			"using_pmk" :         usingPmk,
+			"using_cmk_key_url" : usingCmkKeyUrl,
+			"msi_resource_id": msiResourceId,
+		},
+	}
+}
+
 func FlattenHDInsightsConfigurations(input map[string]*string, d *pluginsdk.ResourceData) []interface{} {
-	enabled := true
+	//enabled := true
 
 	username := ""
 	if v, exists := input["restAuthCredential.username"]; exists && v != nil {
@@ -480,7 +514,7 @@ func FlattenHDInsightsConfigurations(input map[string]*string, d *pluginsdk.Reso
 
 	return []interface{}{
 		map[string]interface{}{
-			"enabled":  enabled,
+			"enabled":  true,
 			"username": username,
 			"password": password,
 		},
@@ -732,6 +766,7 @@ type HDInsightNodeDefinition struct {
 	FixedTargetInstanceCount *int32
 	CanAutoScaleByCapacity   bool
 	CanAutoScaleOnSchedule   bool
+	EncryptDataDisks         bool
 }
 
 func SchemaHDInsightNodeDefinition(schemaLocation string, definition HDInsightNodeDefinition, required bool) *pluginsdk.Schema {
@@ -907,15 +942,6 @@ func SchemaHDInsightNodeDefinition(schemaLocation string, definition HDInsightNo
 		}
 	}
 
-	if definition.CanSpecifyDisks {
-		result["number_of_disks_per_node"] = &pluginsdk.Schema{
-			Type:         pluginsdk.TypeInt,
-			Required:     true,
-			ForceNew:     true,
-			ValidateFunc: validation.IntBetween(1, *definition.MaxNumberOfDisksPerNode),
-		}
-	}
-
 	s := &pluginsdk.Schema{
 		Type:     pluginsdk.TypeList,
 		MaxItems: 1,
@@ -980,6 +1006,10 @@ func ExpandHDInsightNodeDefinition(name string, input []interface{}, definition 
 		}
 	}
 
+	if definition.EncryptDataDisks {
+		role.EncryptDataDisks = utils.Bool(true)
+	}
+
 	if definition.CanSpecifyInstanceCount {
 		minInstanceCount := v["min_instance_count"].(int)
 		if minInstanceCount > 0 {
@@ -1002,13 +1032,10 @@ func ExpandHDInsightNodeDefinition(name string, input []interface{}, definition 
 	}
 
 	if definition.CanSpecifyDisks {
-		numberOfDisksPerNode := v["number_of_disks_per_node"].(int)
-		if numberOfDisksPerNode > 0 {
-			role.DataDisksGroups = &[]hdinsight.DataDisksGroups{
-				{
-					DisksPerNode: utils.Int32(int32(numberOfDisksPerNode)),
-				},
-			}
+		role.DataDisksGroups = &[]hdinsight.DataDisksGroups{
+			{
+				DisksPerNode: utils.Int32(int32(1)),
+			},
 		}
 	}
 
@@ -1184,16 +1211,6 @@ func FlattenHDInsightNodeDefinition(input *hdinsight.Role, existing []interface{
 			autoscale := FlattenHDInsightNodeAutoscaleDefinition(input.AutoscaleConfiguration)
 			if autoscale != nil {
 				output["autoscale"] = autoscale
-			}
-		}
-	}
-
-	if definition.CanSpecifyDisks {
-		output["number_of_disks_per_node"] = 0
-		if input.DataDisksGroups != nil && len(*input.DataDisksGroups) > 0 {
-			group := (*input.DataDisksGroups)[0]
-			if group.DisksPerNode != nil {
-				output["number_of_disks_per_node"] = int(*group.DisksPerNode)
 			}
 		}
 	}

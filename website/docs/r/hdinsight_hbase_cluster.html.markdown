@@ -38,9 +38,16 @@ resource "azurerm_hdinsight_hbase_cluster" "example" {
   location            = azurerm_resource_group.example.location
   cluster_version     = "3.6"
   tier                = "Standard"
+  enable_accelerated_writes = true 
 
   component_version {
     hbase = "1.1"
+  }
+
+  enable_disk_encryption {
+    using_pmk    = false
+    using_cmk_key_url = "https://example.vault.azure.net/keys/xxxxx/xxxxxx"
+    msi_resource_id   = "/subscriptions/xxxxxx-xxxxxxx-xxxx-xxxxxxx-xxxxxx/resourcegroups/example/providers/microsoft.managedidentity/userassignedidentities/example-assigned-managed-identity"
   }
 
   gateway {
@@ -102,6 +109,8 @@ The following arguments are supported:
 
 * `tier` - (Required) Specifies the Tier which should be used for this HDInsight HBase Cluster. Possible values are `Standard` or `Premium`. Changing this forces a new resource to be created.
 
+* `enable_accelerated_writes` - (Optional) enables the accelerated writes for `HBase`. Default is `false`. Changing this forces a new resource to be created.
+
 * `min_tls_version` - (Optional) The minimal supported TLS version. Possible values are 1.0, 1.1 or 1.2. Changing this forces a new resource to be created.
 
 ~> **NOTE:** Starting on June 30, 2020, Azure HDInsight will enforce TLS 1.2 or later versions for all HTTPS connections. For more information, see [Azure HDInsight TLS 1.2 Enforcement](https://azure.microsoft.com/en-us/updates/azure-hdinsight-tls-12-enforcement/).
@@ -121,6 +130,18 @@ The following arguments are supported:
 A `component_version` block supports the following:
 
 * `hbase` - (Required) The version of HBase which should be used for this HDInsight HBase Cluster. Changing this forces a new resource to be created.
+
+---
+A `enable_disk_encryption` block supports the following:
+* `using_pmk` (Optional, conflicts with `using_cmk_key_url` and `msi_resource_id`) enables `encryptionAtHost` using **Platform Managed Keys**. Changing this forces a new resource to be created.
+* `using_cmk_key_url` (Optional, conflicts with `using_pmk` and requires `msi_resource_id`) enables `encryptionAtHost` using **Customer Managed Keys**.
+* `msi_resource_id` (Optional, conflicts with `using_pmk` and required with `using_cmk_key_url`) provides the identity for **Customer Managed Keys**. Changing this forces a new resource to be created.
+
+`enable_disk_encryption` require one of the following to be set:
+* `using_pmk` `true` or `false`
+* `using_cmk_key_url` with `msi_resource_id`
+* `using_cmk_key_url` can be rotated by providing the new key url.
+
 
 ---
 

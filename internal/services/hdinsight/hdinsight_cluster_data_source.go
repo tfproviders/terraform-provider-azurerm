@@ -2,6 +2,7 @@ package hdinsight
 
 import (
 	"fmt"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"strings"
 	"time"
 
@@ -78,6 +79,27 @@ func dataSourceHDInsightSparkCluster() *pluginsdk.Resource {
 				},
 			},
 
+			"enable_disk_encryption": {
+				Type:     pluginsdk.TypeList,
+				Computed: true,
+				Elem: &pluginsdk.Resource{
+					Schema: map[string]*pluginsdk.Schema{
+						"using_pmk": {
+							Type:     schema.TypeBool,
+							Computed: true,
+						},
+						"using_cmk_key_url": {
+							Type:     pluginsdk.TypeString,
+							Computed: true,
+						},
+						"msi_resource_id": {
+							Type:      pluginsdk.TypeString,
+							Computed:  true,
+						},
+					},
+				},
+			},
+
 			"tags": tags.SchemaDataSource(),
 
 			"edge_ssh_endpoint": {
@@ -143,6 +165,9 @@ func dataSourceHDInsightClusterRead(d *pluginsdk.ResourceData, meta interface{})
 			d.Set("component_versions", flattenHDInsightsDataSourceComponentVersions(def.ComponentVersion))
 			if kind := def.Kind; kind != nil {
 				d.Set("kind", strings.ToLower(*kind))
+				if diskEncryptDef := props.DiskEncryptionProperties; diskEncryptDef != nil && *kind == "HBase" {
+					d.Set("enable_disk_encryption", FlattenHDInsightsDiskEncryptionConfigurations(diskEncryptDef))
+				}
 			}
 			if err := d.Set("gateway", FlattenHDInsightsConfigurations(configuration.Value, d)); err != nil {
 				return fmt.Errorf("flattening `gateway`: %+v", err)

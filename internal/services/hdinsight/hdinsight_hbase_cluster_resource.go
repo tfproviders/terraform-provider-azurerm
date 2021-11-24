@@ -2,6 +2,7 @@ package hdinsight
 
 import (
 	"fmt"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"log"
 	"time"
 
@@ -31,6 +32,14 @@ var hdInsightHBaseClusterWorkerNodeDefinition = HDInsightNodeDefinition{
 	MinInstanceCount:        1,
 	CanSpecifyDisks:         false,
 	CanAutoScaleOnSchedule:  true,
+}
+
+var hdInsightHBaseClusterWorkerNodeDefinitionWithAcceleratedWrites = HDInsightNodeDefinition{
+	CanSpecifyInstanceCount: true,
+	MinInstanceCount:        1,
+	CanSpecifyDisks:         true,
+	CanAutoScaleOnSchedule:  true,
+	MaxNumberOfDisksPerNode: utils.Int(1),
 }
 
 var hdInsightHBaseClusterZookeeperNodeDefinition = HDInsightNodeDefinition{
@@ -69,6 +78,13 @@ func resourceHDInsightHBaseCluster() *pluginsdk.Resource {
 			"tier": SchemaHDInsightTier(),
 
 			"tls_min_version": SchemaHDInsightTls(),
+
+			"enable_accelerated_writes": {
+				Type:     pluginsdk.TypeBool,
+				Optional: true,
+				ForceNew: true,
+				Default:  false,
+			},
 
 			"component_version": {
 				Type:     pluginsdk.TypeList,
@@ -110,6 +126,54 @@ func resourceHDInsightHBaseCluster() *pluginsdk.Resource {
 				},
 			},
 
+			"enable_disk_encryption": {
+				Type:     schema.TypeList,
+				Description: "Disk encryption using Customer Provided Keys or Platform Provided Keys",
+				Optional: true,
+				ForceNew: true,
+				MaxItems: 1,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"using_pmk": {
+							Type:     schema.TypeBool,
+							Description: "Disk encryption using Platform Provided Keys",
+							Optional: true,
+							ForceNew: true,
+							ConflictsWith: []string{"enable_disk_encryption.0.using_cmk_key_url"},
+							AtLeastOneOf: []string{"enable_disk_encryption.0.using_pmk", "enable_disk_encryption.0.using_cmk_key_url"},
+						},
+						"using_cmk_key_url": {
+							Type:     schema.TypeString,
+							Description: "Disk encryption using Customer Provided Keys",
+							Optional: true,
+							ConflictsWith: []string{"enable_disk_encryption.0.using_pmk"},
+							RequiredWith: []string{"enable_disk_encryption.0.msi_resource_id"},
+							AtLeastOneOf: []string{"enable_disk_encryption.0.using_pmk", "enable_disk_encryption.0.using_cmk_key_url"},
+							ValidateFunc: func(i interface{}, k string) (warnings []string, errors []error) {
+								value := i.(string)
+								if value == "" {
+									errors = append(errors, fmt.Errorf("`using_cmk_key_url` cannot be null or blank"))
+								}
+								return warnings, errors
+							},
+						},
+						"msi_resource_id": {
+							Type:     schema.TypeString,
+							Optional: true,
+							ForceNew: true,
+							ConflictsWith: []string{"enable_disk_encryption.0.using_pmk"},
+							ValidateFunc: func(i interface{}, k string) (warnings []string, errors []error) {
+								value := i.(string)
+								if value == "" {
+									errors = append(errors, fmt.Errorf("`msi_resource_id` cannot be null or blank, when `using_cmk_key_url` is set"))
+								}
+								return warnings, errors
+							},
+						},
+					},
+				},
+			},
+
 			"tags": tags.Schema(),
 
 			"https_endpoint": {
@@ -128,6 +192,9 @@ func resourceHDInsightHBaseCluster() *pluginsdk.Resource {
 }
 
 func resourceHDInsightHBaseClusterCreate(d *pluginsdk.ResourceData, meta interface{}) error {
+	var encryptDataDisks *hdinsight.DiskEncryptionProperties
+	var identity *hdinsight.ClusterIdentity
+	var params hdinsight.ClusterCreateParametersExtended
 	client := meta.(*clients.Client).HDInsight.ClustersClient
 	subscriptionId := meta.(*clients.Client).Account.SubscriptionId
 	extensionsClient := meta.(*clients.Client).HDInsight.ExtensionsClient
@@ -161,11 +228,20 @@ func resourceHDInsightHBaseClusterCreate(d *pluginsdk.ResourceData, meta interfa
 	if err != nil {
 		return fmt.Errorf("failure expanding `storage_account`: %s", err)
 	}
-
-	hbaseRoles := hdInsightRoleDefinition{
-		HeadNodeDef:      hdInsightHBaseClusterHeadNodeDefinition,
-		WorkerNodeDef:    hdInsightHBaseClusterWorkerNodeDefinition,
-		ZookeeperNodeDef: hdInsightHBaseClusterZookeeperNodeDefinition,
+    enableAcceleratedWrites := d.Get("enable_accelerated_writes").(bool)
+	hbaseRoles := decideHDInsightNodeDefinition(enableAcceleratedWrites)
+	/*
+	`enable_disk_encryption` block is optional, It supports both PMK and CMK
+	 */
+	enabledDiskEncryptionRaw := d.Get("enable_disk_encryption").([]interface{})
+	if len(enabledDiskEncryptionRaw) > 0 {
+		encryptDataDisks, err = hdInsightEncryptDataDiskProperties(enabledDiskEncryptionRaw)
+		if err != nil {
+			return fmt.Errorf("failure expanding `enable_disk_encryption`: %+v", err)
+		}
+		if encryptDataDisks.MsiResourceID != nil {
+			identity = hdinsightUserDefinedClusterIdentity(*encryptDataDisks.MsiResourceID)
+		}
 	}
 	rolesRaw := d.Get("roles").([]interface{})
 	roles, err := expandHDInsightRoles(rolesRaw, hbaseRoles)
@@ -184,27 +260,57 @@ func resourceHDInsightHBaseClusterCreate(d *pluginsdk.ResourceData, meta interfa
 		return tf.ImportAsExistsError("azurerm_hdinsight_hbase_cluster", *existing.ID)
 	}
 
-	params := hdinsight.ClusterCreateParametersExtended{
-		Location: utils.String(location),
-		Properties: &hdinsight.ClusterCreateProperties{
-			Tier:                   tier,
-			OsType:                 hdinsight.OSTypeLinux,
-			ClusterVersion:         utils.String(clusterVersion),
-			MinSupportedTLSVersion: utils.String(tls),
-			ClusterDefinition: &hdinsight.ClusterDefinition{
-				Kind:             utils.String("HBase"),
-				ComponentVersion: componentVersions,
-				Configurations:   configurations,
+	if len(enabledDiskEncryptionRaw) > 0 {
+		/*
+		If `enable_disk_encryption` block is set then only add
+		`DiskEncryptionProperties` to `params`
+		 */
+		params = hdinsight.ClusterCreateParametersExtended{
+			Location: utils.String(location),
+			Properties: &hdinsight.ClusterCreateProperties{
+				Tier:                   tier,
+				OsType:                 hdinsight.OSTypeLinux,
+				ClusterVersion:         utils.String(clusterVersion),
+				MinSupportedTLSVersion: utils.String(tls),
+				ClusterDefinition: &hdinsight.ClusterDefinition{
+					Kind:             utils.String("HBase"),
+					ComponentVersion: componentVersions,
+					Configurations:   configurations,
+				},
+				StorageProfile: &hdinsight.StorageProfile{
+					Storageaccounts: storageAccounts,
+				},
+				ComputeProfile: &hdinsight.ComputeProfile{
+					Roles: roles,
+				},
+				DiskEncryptionProperties: encryptDataDisks,
 			},
-			StorageProfile: &hdinsight.StorageProfile{
-				Storageaccounts: storageAccounts,
+			Tags:     tags.Expand(t),
+			Identity: identity,
+		}
+	} else {
+		params = hdinsight.ClusterCreateParametersExtended{
+			Location: utils.String(location),
+			Properties: &hdinsight.ClusterCreateProperties{
+				Tier:                   tier,
+				OsType:                 hdinsight.OSTypeLinux,
+				ClusterVersion:         utils.String(clusterVersion),
+				MinSupportedTLSVersion: utils.String(tls),
+				ClusterDefinition: &hdinsight.ClusterDefinition{
+					Kind:             utils.String("HBase"),
+					ComponentVersion: componentVersions,
+					Configurations:   configurations,
+				},
+				StorageProfile: &hdinsight.StorageProfile{
+					Storageaccounts: storageAccounts,
+				},
+				ComputeProfile: &hdinsight.ComputeProfile{
+					Roles: roles,
+				},
 			},
-			ComputeProfile: &hdinsight.ComputeProfile{
-				Roles: roles,
-			},
-		},
-		Tags:     tags.Expand(t),
-		Identity: identity,
+			Tags:     tags.Expand(t),
+			Identity: identity,
+		}
 	}
 
 	if v, ok := d.GetOk("security_profile"); ok {
@@ -299,7 +405,11 @@ func resourceHDInsightHBaseClusterRead(d *pluginsdk.ResourceData, meta interface
 		d.Set("cluster_version", props.ClusterVersion)
 		d.Set("tier", string(props.Tier))
 		d.Set("tls_min_version", props.MinSupportedTLSVersion)
-
+		if props.DiskEncryptionProperties != nil {
+			if err := d.Set("enable_disk_encryption", FlattenHDInsightsDiskEncryptionConfigurations(props.DiskEncryptionProperties)); err !=nil {
+				return fmt.Errorf("failure flattening `enable_disk_encryption`: %+v", err)
+			}
+		}
 		if def := props.ClusterDefinition; def != nil {
 			if err := d.Set("component_version", flattenHDInsightHBaseComponentVersion(def.ComponentVersion)); err != nil {
 				return fmt.Errorf("failure flattening `component_version`: %+v", err)
@@ -311,12 +421,8 @@ func resourceHDInsightHBaseClusterRead(d *pluginsdk.ResourceData, meta interface
 
 			flattenHDInsightsMetastores(d, configurations.Configurations)
 		}
-
-		hbaseRoles := hdInsightRoleDefinition{
-			HeadNodeDef:      hdInsightHBaseClusterHeadNodeDefinition,
-			WorkerNodeDef:    hdInsightHBaseClusterWorkerNodeDefinition,
-			ZookeeperNodeDef: hdInsightHBaseClusterZookeeperNodeDefinition,
-		}
+		enableAcceleratedWrites := d.Get("enable_accelerated_writes").(bool)
+		hbaseRoles := decideHDInsightNodeDefinition(enableAcceleratedWrites)
 		flattenedRoles := flattenHDInsightRoles(d, props.ComputeProfile, hbaseRoles)
 		if err := d.Set("roles", flattenedRoles); err != nil {
 			return fmt.Errorf("failure flattening `roles`: %+v", err)
@@ -361,4 +467,22 @@ func flattenHDInsightHBaseComponentVersion(input map[string]*string) []interface
 			"hbase": hbaseVersion,
 		},
 	}
+}
+
+func decideHDInsightNodeDefinition(enableWrites bool) hdInsightRoleDefinition {
+	var hbaseRoles hdInsightRoleDefinition
+	if enableWrites {
+		hbaseRoles = hdInsightRoleDefinition{
+			HeadNodeDef:      hdInsightHBaseClusterHeadNodeDefinition,
+			WorkerNodeDef:    hdInsightHBaseClusterWorkerNodeDefinitionWithAcceleratedWrites,
+			ZookeeperNodeDef: hdInsightHBaseClusterZookeeperNodeDefinition,
+		}
+	} else {
+		hbaseRoles = hdInsightRoleDefinition{
+			HeadNodeDef:      hdInsightHBaseClusterHeadNodeDefinition,
+			WorkerNodeDef:    hdInsightHBaseClusterWorkerNodeDefinition,
+			ZookeeperNodeDef: hdInsightHBaseClusterZookeeperNodeDefinition,
+		}
+	}
+	return hbaseRoles
 }

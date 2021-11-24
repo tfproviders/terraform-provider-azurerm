@@ -40,6 +40,8 @@ output "https_endpoint" {
 
 * `gateway` - A `gateway` block as defined below.
 
+* `enable_disk_encryption` - A `enable_disk_encryption` block as defined below, only supports `HBase`
+
 * `edge_ssh_endpoint` - The SSH Endpoint of the Edge Node for this HDInsight Cluster, if an Edge Node exists.
 
 * `https_endpoint` - The HTTPS Endpoint for this HDInsight Cluster.
@@ -65,6 +67,17 @@ A `gateway` block exports the following:
 * `username` - The username used for the Ambari Portal.
 
 * `password` - The password used for the Ambari Portal.
+
+---
+
+A `enable_disk_encryption` block exports the following:
+
+* `using_pmk` enables `encryptionAtHost` using **Platform Managed Keys**
+* `using_cmk_key_url` enables `encryptionAtHost` using **Customer Managed Keys**.
+* `msi_resource_id` provides the identity for **Customer Managed Keys**.
+
+~> **NOTE:** only support `HBase` for now.
+
 
 ## Timeouts
 
